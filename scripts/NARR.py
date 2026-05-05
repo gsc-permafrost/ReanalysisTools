@@ -122,7 +122,6 @@ class interpolateNARR(readNARR):
         self.samplePoints = gpd.GeoDataFrame(
             data=self.samplePoints, geometry=gpd.points_from_xy(self.samplePoints['lon'], self.samplePoints['lat']), crs="EPSG:4326"
         )
-        super().__post_init__()
         
         # WKT description of the NARR LCC projection
         # Source: https://spatialreference.org/ref/sr-org/8214/
@@ -132,6 +131,10 @@ class interpolateNARR(readNARR):
         bbox = self.samplePoints.total_bounds
         self.target = np.array([self.samplePoints.geometry.x,self.samplePoints.geometry.y]).T
         searchBuffer = self.samplePoints.buffer(self.searchDistance).geometry[0]
+
+
+        super().__post_init__()
+        
         x,y = np.meshgrid(self.x,self.y)
         x,y = x.flatten(),y.flatten()
 
