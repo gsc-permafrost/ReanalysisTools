@@ -15,47 +15,99 @@ from scipy.interpolate import RBFInterpolator
 
 @dataclass(kw_only=True)
 class downloadNARR:
-    variableName: str
-    date: int
+    variableNames: list
+    dates: list
     level: str
-    baseURL: str = 'https://downloads.psl.noaa.gov/Datasets/NARR/'
+    baseURL: str = 'https://downloads.psl.noaa.gov/Datasets/NARR'
     downloadPath: str = os.path.abspath(os.path.join(os.path.split(__file__)[0],'..','ncFiles'))
 
     def __post_init__(self):
-        if type(self.date) is str:
-            self.date = int(self.date)
-        if self.level == 'pressure' and len(str(self.date)) != 6:
-            exit('Expected date in YYYYMMM format')
-        if self.level in ['monolevel'] and len(str(self.date)) != 4:
-            exit('Expected date in YYYY format')
+        if not isinstance(self.dates,list):
+            self.dates = [self.dates]
+            for i,d in enumerate(self.dates):
+                if type(d) is str:
+                    self.dates[i] = int(d)
+                if self.level == 'pressure' and len(str(d)) != 6:
+                    exit('Expected date in YYYYMMM format')
+                if self.level in ['monolevel'] and len(str(d)) != 4:
+                    exit('Expected date in YYYY format')
+        if not isinstance(self.variableNames,list):
+            self.variableNames = [self.variableNames]
         
-        self.fileName = f"{self.variableName}.{self.date}.nc"
-        self.filePath = os.path.join(self.downloadPath,self.fileName)
-        url = f"{self.baseURL}/{self.level}/{self.fileName}"
+        self.fileNames = {}
+        self.filePaths = {}
+        self.fileIndex = {d:{vn:f"{vn}.{d}.nc" for vn in self.variableNames} for d in self.dates}
+        for y,vars in self.fileIndex.items():
+            for vn,fn in vars.items():
+                fp,exits = self.filePath(fn)
+                if not exits:
+                    url = self.urlPath(fn)
+                    print(f'downloading: {url}')
+                    if not os.path.isdir(self.downloadPath):
+                        os.makedirs(self.downloadPath)
+                    urllib.request.urlretrieve(url,fp)
+                    print(f'saved: {fp}')
+        # self.fileIndex = [[vn.split('.')[0],d] for vn in self.variableNames for d in self.dates] 
+        # self.fileNames = [f"{vn}.{d}.nc" for vn in self.variableNames for d in self.dates]
+        # self.filePaths = [os.path.join(self.downloadPath,fn) for fn in self.fileNames]
+        # urls = [f"{self.baseURL}/{self.level}/{fn}" for fn in self.fileNames]
+        # for i,fp in enumerate(self.filePaths):
+        #     if not os.path.isfile(fp):
+        #         print(f'downloading: {urls[i]}')
+        #         if not os.path.isdir(self.downloadPath):
+        #             os.makedirs(self.downloadPath)
+        #         urllib.request.urlretrieve(urls[i],fp)
+        #         print(f'saved: {fp}')
 
-        if not os.path.isfile(self.filePath):
-            print(f'downloading: {url}')
-            if not os.path.isdir(self.downloadPath):
-                os.makedirs(self.downloadPath)
-            urllib.request.urlretrieve(url,self.filePath)
-            print(f'saved: {self.filePath}')
+    def filePath(self,fn):
+        fp = os.path.join(self.downloadPath,fn)
+        return(fp,os.path.isfile(fp))
+    
+    def urlPath(self,fn):
+        return(f"{self.baseURL}/{self.level}/{fn}")
             
-
 @dataclass(kw_only=True)
 class readNARR(downloadNARR):
 
     def __post_init__(self):
         super().__post_init__()
+        self.variables = {}
+        time = []
+        variables = [[] for v in self.variableNames]
+        j = 0
         
-        self.dataset = netCDF4.Dataset(self.filePath)
-        self.lon = np.ma.getdata(self.dataset.variables['lon'][:])
-        self.lat = np.ma.getdata(self.dataset.variables['lat'][:])
-        self.x = np.ma.getdata(self.dataset.variables['x'][:])
-        self.y = np.ma.getdata(self.dataset.variables['y'][:])
-        self.time = self.dataset.variables['time']
-        self.time = netCDF4.num2date(self.time[:], self.time.units,calendar = 'standard',only_use_cftime_datetimes=False)
-        self.time = pd.to_datetime(self.time).tz_localize('UTC')
-        self.variable = np.ma.getdata(self.dataset.variables[self.variableName.split('.')[0]][:])
+        self.coordinates = {}
+        self.data = {}
+        self.metadata = {}
+        # coordinates = {'lon':{},'lat':{},'x':{},'y':{}}
+        i = 0
+        for yr,vars in self.fileIndex.items():
+            for vn,fn in vars.items():
+                fp,exits = self.filePath(fn)
+                if not exits:
+                    exit()
+                dataset = netCDF4.Dataset(fp)
+                if vn == self.variableNames[0]:
+                    tx = dataset.variables['time']
+                    tx = netCDF4.num2date(tx[:], tx.units,calendar = 'standard',only_use_cftime_datetimes=False)
+                    if yr == self.dates[0]:
+                        index = tx
+                    else:
+                       index = np.concatenate((index,tx))
+                if yr == self.dates[0]:
+                    self.coordinates[vn] = {}
+                    self.coordinates[vn]['lon'] = np.ma.getdata(dataset.variables['lon'][:])
+                    self.coordinates[vn]['lat'] = np.ma.getdata(dataset.variables['lat'][:])
+                    self.coordinates[vn]['x'] = np.ma.getdata(dataset.variables['x'][:])
+                    self.coordinates[vn]['y'] = np.ma.getdata(dataset.variables['y'][:])
+                    self.metadata[vn] = dataset.variables[vn.split('.')[0]]
+                    self.data[vn] = []
+                    self.data[vn] = np.ma.getdata(dataset.variables[vn.split('.')[0]][:])
+                else:
+                    self.data[vn] = np.concatenate((
+                        self.data[vn],np.ma.getdata(dataset.variables[vn.split('.')[0]][:])
+                    ))
+        self.index = pd.to_datetime(index).tz_localize('UTC')
 
 @dataclass(kw_only=True)
 class interpolateNARR(readNARR):
@@ -64,6 +116,7 @@ class interpolateNARR(readNARR):
     })
     grid_pad: int = 2
     searchDistance: float = 5e4
+    extrapolate: bool = False
 
     def __post_init__(self):
         self.samplePoints = gpd.GeoDataFrame(
@@ -93,36 +146,38 @@ class interpolateNARR(readNARR):
         # xi,yi = xi.flatten(),yi.flatten()
         self.xy = np.array([selection.geometry.x.values,selection.geometry.y.values]).T
 
-        self.variableSelection = self.variable[:,key[0],key[1]]
+        self.dataSelection = {var:self.data[var][:,key[0],key[1]] for var in self.variableNames}
 
-        self.timeSeries = pd.DataFrame(
-            index=self.time,
-            data={
-                self.variableName:[self.interpolate(self.variable[i,key[0],key[1]])[0] for i in range(self.variableSelection.shape[0])]
-                })
-
-
+        self.timeSeries = pd.concat(
+            [pd.DataFrame(
+                index=self.index,
+                columns=[f"{vn}_{n}" for n in self.samplePoints['name']],
+                data = np.array(
+                    [self.interpolate(self.data[vn][i,key[0],key[1]]) for i in range(self.index.shape[0])]
+                )
+            )
+            for vn in self.variableNames],axis=1
+        )
+        breakpoint()
 
         # Make plot of grid cells
-        lon_box = self.lon[key[0],key[1]]
-        lat_box = self.lat[key[0],key[1]]
-        # self.x_bounds = [np.where(self.x<bbox[0])[0][-(1+self.grid_pad)],np.where(self.x>bbox[2])[0][self.grid_pad]]
-        # self.y_bounds = [np.where(self.y<bbox[1])[0][-(1+self.grid_pad)],np.where(self.y>bbox[3])[0][self.grid_pad]]
-        
-        # lon_box = self.lon[self.y_bounds[0]:self.y_bounds[1],self.x_bounds[0]:self.x_bounds[1]]
-        # lat_box = self.lat[self.y_bounds[0]:self.y_bounds[1],self.x_bounds[0]:self.x_bounds[1]]
+        # lon_box = self.lon[key[0],key[1]]
+        # lat_box = self.lat[key[0],key[1]]
 
-        m = folium.Map(location=[self.samplePoints.lat[0],self.samplePoints.lon[0]])   
-        for at,on in zip (lat_box.flatten(),lon_box.flatten()):
-            folium.Marker([at, on]).add_to(m)
-        folium.CircleMarker([self.samplePoints.lat[0],self.samplePoints.lon[0]],popup=self.samplePoints.name[0]).add_to(m)
-        m.save(os.path.join(self.downloadPath,f'{self.samplePoints.name[0]}_{self.variableName}_grid_pts.html'))
+        # m = folium.Map(location=[self.samplePoints.lat[0],self.samplePoints.lon[0]])   
+        # for at,on in zip (lat_box.flatten(),lon_box.flatten()):
+        #     folium.Marker([at, on]).add_to(m)
+        # folium.CircleMarker([self.samplePoints.lat[0],self.samplePoints.lon[0]],popup=self.samplePoints.name[0]).add_to(m)
+        # m.save(os.path.join(self.downloadPath,f'{self.samplePoints.name[0]}_{self.variableNames}_grid_pts.html'))
 
-        breakpoint()
+        # breakpoint()
 
     def interpolate(self,value,kernel='linear'):
         # Interpolates value from grid (xy) to desired points (coords) using a Radial Bias Function
         # Default behavior is to use a thin plate spline function r**2 * log(r)
-        return(RBFInterpolator(self.xy, value, kernel=kernel)(self.target))
 
-interpolateNARR(level='monlevel',variableName='air.2m',date=2025,samplePoints={'name':['SCL'],'lat':[69],'lon':[-135]},grid_pad=0)
+        vx = RBFInterpolator(self.xy, value, kernel=kernel)(self.target)
+        if not self.extrapolate:
+            vx[vx<value.min()]=value.min()
+            vx[vx>value.max()]=value.max()
+        return(vx)
