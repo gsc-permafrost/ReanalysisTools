@@ -12,6 +12,123 @@ import folium
 # from datetime import timedelta
 from scipy.interpolate import RBFInterpolator
 # import datetime
+import time
+
+@dataclass(kw_only=True)
+class getNARR:
+    variableNames: list
+    dates: list
+    level: str
+    baseURL: str = 'https://downloads.psl.noaa.gov/Datasets/NARR'
+    downloadPath: str = os.path.abspath(os.path.join(os.path.split(__file__)[0],'..','ncFiles'))
+
+    samplePoints: dict = field(default_factory=lambda:{
+        'name':[],'lat':[],'lon':[]
+    })
+    grid_pad: int = 2
+    searchDistance: float = 5e4
+    extrapolate: bool = False
+    metadata: dict = field(init=False,default_factory=dict)
+    timeSeries: dict = field(init=False,default_factory=dict)
+
+    def __post_init__(self):
+        self.setTarget()
+        self.getData()
+
+    def setTarget(self):
+        if not isinstance(self.samplePoints,gpd.GeoDataFrame):
+            self.samplePoints = gpd.GeoDataFrame(
+                data=self.samplePoints, geometry=gpd.points_from_xy(self.samplePoints['lon'], self.samplePoints['lat']), crs="EPSG:4326"
+            )
+             
+        # WKT description of the NARR LCC projection
+        # Source: https://spatialreference.org/ref/sr-org/8214/
+        NARR_LCC = '+proj=lcc +lat_1=50 +lat_0=50 +lon_0=-107 +k_0=1 +x_0=5632642.22547 +y_0=4612545.65137 +a=6371200 +b=6371200 +units=m +no_defs'
+        self.samplePoints = self.samplePoints.to_crs(NARR_LCC)
+        
+        # bbox = self.samplePoints.total_bounds
+        self.target = np.array([self.samplePoints.geometry.x,self.samplePoints.geometry.y]).T
+        # searchBuffer = self.samplePoints.buffer(self.searchDistance).geometry
+
+
+    def getData(self):
+        if not isinstance(self.dates,list):
+            self.dates = [self.dates]
+            for i,d in enumerate(self.dates):
+                if type(d) is str:
+                    self.dates[i] = int(d)
+                if self.level == 'pressure' and len(str(d)) != 6:
+                    exit('Expected date in YYYYMMM format')
+                if self.level in ['monolevel'] and len(str(d)) != 4:
+                    exit('Expected date in YYYY format')
+        if not isinstance(self.variableNames,list):
+            self.variableNames = [self.variableNames]
+        self.fileNames = {}
+        self.filePaths = {}
+        self.fileIndex = {d:{vn:f"{vn}.{d}.nc" for vn in self.variableNames} for d in self.dates}
+        for year,vars in self.fileIndex.items():
+            self.timeSeries[year] = {}
+            for vn,fn in vars.items():
+                fp,exits = self.filePath(fn)
+                if not exits:
+                    url = self.urlPath(fn)
+                    print(f'downloading: {url}')
+                    if not os.path.isdir(self.downloadPath):
+                        os.makedirs(self.downloadPath)
+                    urllib.request.urlretrieve(url,fp)
+                    print(f'saved: {fp}')
+                self.timeSeries[year][vn] = self.readData(year,vn,fp)
+            self.timeSeries[year] = pd.concat([self.timeSeries[year][vn] for vn in vars.keys()],axis=1)
+        self.timeSeries = pd.concat([self.timeSeries[year] for year in self.timeSeries.keys()],axis=0)
+        breakpoint()
+        self.timeSeries.to_csv(os.path.join(self.downloadPath,'interpolatedTimeSeries.csv'))
+
+
+    def filePath(self,fn):
+        fp = os.path.join(self.downloadPath,fn)
+        return(fp,os.path.isfile(fp))
+    
+    def urlPath(self,fn):
+        return(f"{self.baseURL}/{self.level}/{fn}")
+
+    def readData(self,year,vn,fp):
+        dataset = netCDF4.Dataset(fp)
+        tx = dataset.variables['time']
+        tx = netCDF4.num2date(tx[:], tx.units,calendar = 'standard',only_use_cftime_datetimes=False)
+        index = pd.to_datetime(tx).tz_localize('UTC')
+        self.lon = np.ma.getdata(dataset.variables['lon'][:])
+        self.lat = np.ma.getdata(dataset.variables['lat'][:])
+        self.x = np.ma.getdata(dataset.variables['x'][:])
+        self.y = np.ma.getdata(dataset.variables['y'][:])
+
+        self.metadata[vn] = dataset.variables[vn.split('.')[0]]
+        data = np.ma.getdata(dataset.variables[vn.split('.')[0]][:])
+
+        x,y = np.meshgrid(self.x,self.y)
+        x,y = x.flatten(),y.flatten()
+        self.xy = np.array([x,y]).T
+
+        print(f'Interpolating {vn}-{year}: ')
+        T1 = time.time()
+        interpolatedValues = pd.DataFrame(
+            index = index,
+            columns=[f"{vn}_{n}" for n in self.samplePoints['name']],
+            data = np.array(
+                    [self.interpolate(data[i,:,:].flatten()) for i in range(index.shape[0])]
+                ))
+        print('runtime = ',round(time.time()-T1,2))
+        return(interpolatedValues)
+
+    def interpolate(self,value,kernel='thin_plate_spline',neighbors=20):
+        # Interpolates value from grid (xy) to desired points (coords) using a Radial Bias Function
+        # Default behavior is to use a thin plate spline function r**2 * log(r)
+
+        vx = RBFInterpolator(self.xy, value, kernel=kernel,neighbors=neighbors)(self.target)
+        if not self.extrapolate:
+            breakpoint()
+            vx[vx<value.min()]=value.min()
+            vx[vx>value.max()]=value.max()
+        return(vx)
 
 @dataclass(kw_only=True)
 class downloadNARR:
@@ -59,12 +176,6 @@ class downloadNARR:
         #         urllib.request.urlretrieve(urls[i],fp)
         #         print(f'saved: {fp}')
 
-    def filePath(self,fn):
-        fp = os.path.join(self.downloadPath,fn)
-        return(fp,os.path.isfile(fp))
-    
-    def urlPath(self,fn):
-        return(f"{self.baseURL}/{self.level}/{fn}")
             
 @dataclass(kw_only=True)
 class readNARR(downloadNARR):
