@@ -3,3 +3,4 @@ geopandas
 scipy
 matplotlib
 folium
+pyyaml

@@ -1,6 +1,7 @@
 from dataclasses import dataclass,field
 import os
-# import sys
+import yaml
+import shutil
 import numpy as np
 import pandas as pd
 import netCDF4
@@ -11,25 +12,194 @@ import folium
 # import configparser
 # from datetime import timedelta
 from scipy.interpolate import RBFInterpolator
-# import datetime
+import datetime
 import time
+
+@dataclass(kw_only=True)
+class narrData:
+    years: list
+    variableNames: list
+    level: str = 'monolevel'
+    baseURL: str = 'https://downloads.psl.noaa.gov/Datasets/NARR'
+    downloadPath: str = os.path.abspath(os.path.join(os.path.split(__file__)[0],'..','ncFiles'))
+    metadata: dict = field(init=False,default_factory=dict)
+
+    def __post_init__(self):
+        # self.getFileList()
+        self.findFiles()
+
+    def findFiles(self):
+        
+        if not isinstance(self.variableNames,list):
+            self.variableNames = [self.variableNames]
+        self.fileIndex = {yr:{vn:self.getFile(yr,vn) for vn in self.variableNames} for yr in self.years}
+    
+    def getFile(self,year,variableName,subFolder='fullYear'):
+        filePath,exists = self.formatFilePath(f"{variableName}.{year}.nc",subFolder)
+        if not exists:
+            if subFolder == 'fullYear':
+                filePath = self.getFile(year,variableName,subFolder='partialYear')
+            else: 
+                self.download(f"{variableName}.{year}.nc",filePath)
+        elif exists and subFolder == 'partialYear':
+            filePath,flag=self.timeCheck(filePath)
+            if flag:
+                filePath = self.getFile(year,variableName,subFolder='partialYear')
+        return filePath
+    
+    def timeCheck(self,filePath):
+        with netCDF4.Dataset(filePath) as dataset:
+            tx = self.getTime(dataset)
+        if tx.month.max()==12 and 'partialYear' in filePath:
+            fp = filePath.replace('partialYear','fullYear')
+            shutil.move(filePath,fp)
+            filePath = fp
+            flag = False
+        else:
+            if tx.month.max() != datetime.datetime.now().month-1 and (time.time()-os.path.getctime(filePath))/(3660*24) >1:
+                os.remove(filePath)
+                print(f"removing and re-downloading: {filePath}")
+                flag = True
+            else:
+                flag = False
+        return(filePath,flag)
+                
+    def getTime(self,dataset):
+        tx = dataset.variables['time']
+        tx = netCDF4.num2date(tx[:], tx.units,calendar = 'standard',only_use_cftime_datetimes=False)
+        return pd.to_datetime(tx).tz_localize('UTC')
+
+    def formatFilePath(self,fn,subFolder=''):
+        fp = os.path.join(self.downloadPath,subFolder,fn)
+        return(fp,os.path.isfile(fp))
+    
+    def urlPath(self,fn):
+        return(f"{self.baseURL}/{self.level}/{fn}")
+    
+    def download(self,fileName,filePath):
+        url = self.urlPath(fileName)
+        print(f'downloading: {url}')
+        if not os.path.isdir(self.downloadPath):
+            os.makedirs(self.downloadPath)
+        urllib.request.urlretrieve(url,filePath)
+        print(f'saved: {filePath}')
+    
+    def read(self,variableName,filePath,mode='full'):
+        with netCDF4.Dataset(filePath) as dataset:
+            tx = self.getTime(dataset)
+            lon = np.ma.getdata(dataset.variables['lon'][:])
+            lat = np.ma.getdata(dataset.variables['lat'][:])
+            x = np.ma.getdata(dataset.variables['x'][:])
+            y = np.ma.getdata(dataset.variables['y'][:])
+            if 'variableName' not in self.metadata:
+                self.metadata[variableName] = dataset.variables[variableName.split('.')[0]].__dict__
+            data = np.ma.getdata(dataset.variables[variableName.split('.')[0]][:])
+            
+            x,y = np.meshgrid(x,y)
+            x,y = x.flatten(),y.flatten()
+            xy = np.array([x,y]).T
+        return(tx,xy,data)
+
+
+@dataclass(kw_only=True)
+class pointEstimates(narrData):
+    samplePoints: gpd.GeoDataFrame = field(default_factory=dict)
+    samplePointsFname: str = 'samplePoints.json'
+    timeSeries: pd.DataFrame = field(default_factory=pd.DataFrame)
+    timeSeriesFname: str = 'interpolatedTimeSeries.csv'
+    neighbors: int = 20
+
+    def __post_init__(self):
+        self.getSamplePoints()
+        self.getTimeSeries()
+        super().__post_init__()
+# (Pdb) c1.flatten()
+# array(['dswrf', 'air.2m', 'dswrf', 'air.2m', 'dswrf', 'air.2m', 'dswrf',
+#        'air.2m'], dtype='<U6')
+# (Pdb) c2.flatten()
+# array(['SCL', 'SCL', 'BSP', 'BSP', 'FIL', 'FIL', 'ILL', 'ILL'],
+    #   dtype=object)
+        for year,vars in self.fileIndex.items():
+            for variableName,filePath in vars.items():
+                index,xy,data = self.read(variableName,filePath)
+                sites = self.samplePoints.siteID.values
+                siteVars = [f"{variableName}_{ID}" for ID in sites]
+                # siteVarsIn = [sv for sv in siteVars if sv in self.timeSeries.columns]
+                # if len(siteVarsIn) < siteVars:
+
+                print(f'Interpolating {variableName}-{year}: ')
+                T1 = time.time()
+                interpolatedValues = np.array(
+                            [self.interpolate(xy,data[i,:,:].flatten()) for i in range(index.shape[0])]
+                        )
+                print('runtime = ',round(time.time()-T1,2))
+                interpolatedValues[np.where(interpolatedValues<self.metadata[variableName]['actual_range'].min())]=self.metadata[variableName]['actual_range'].min()
+                interpolatedValues[np.where(interpolatedValues>self.metadata[variableName]['actual_range'].max())]=self.metadata[variableName]['actual_range'].max()
+                interpolatedValues = pd.DataFrame(
+                    index = index,
+                    columns=siteVars,
+                    data = interpolatedValues)
+                breakpoint()
+        # sites = self.samplePoints.siteID.values
+        # site_vars = [f"{v}_{ID}" for v in self.variableNames for ID in sites]
+        # need_all =  [v for v in site_vars if v not in self.timeSeries.columns]
+        # need_some = [v for v in site_vars if v in self.timeSeries.columns]
+
+        # print([v in site_vars for v in self.timeSeries.columns])
+
+
+    def getTimeSeries(self):
+        index = pd.date_range(start=f'{min(self.years)}-01-01',end=f'{max(self.years)+1}-01-01',freq='3h',inclusive='left').tz_localize('UTC')
+        self.timeSeriesFname = os.path.join(self.downloadPath,self.timeSeriesFname)
+        c1,c2=np.meshgrid(self.samplePoints.siteID.values,self.variableNames)
+        c1,c2=c1.flatten(),c2.flatten()
+        temp = pd.DataFrame(index=index,columns=pd.MultiIndex.from_arrays([c2,c1]))
+        if os.path.isfile(self.timeSeriesFname):
+            breakpoint()
+            self.timeSeries = pd.read_csv(self.timeSeriesFname,index_col=0,parse_dates=[0],header=[0,1])
+            self.timeSeries = pd.concat(
+                [temp,self.timeSeries],axis=1
+            )
+        else:
+            self.timeSeries = temp
+            
+        print([s for s in self.samplePoints.siteID.values if s in self.timeSeries['dswrf'].columns])
+        breakpoint()
+        
+
+    def getSamplePoints(self):
+        if isinstance(self.samplePoints,str):
+            with open(self.samplePoints) as f:
+                self.samplePoints = yaml.safe_load(f)
+            self.samplePoints = pd.DataFrame.from_dict(self.samplePoints,orient='index')
+        self.samplePoints = gpd.GeoDataFrame(
+            data=self.samplePoints, geometry=gpd.points_from_xy(self.samplePoints['longitude'], self.samplePoints['latitude']), crs="EPSG:4326"
+        )
+        # WKT description of the NARR LCC projection, source: https://spatialreference.org/ref/sr-org/8214/
+        NARR_LCC = '+proj=lcc +lat_1=50 +lat_0=50 +lon_0=-107 +k_0=1 +x_0=5632642.22547 +y_0=4612545.65137 +a=6371200 +b=6371200 +units=m +no_defs'
+        self.samplePoints = self.samplePoints.to_crs(NARR_LCC)
+        self.target = np.array([self.samplePoints.geometry.x,self.samplePoints.geometry.y]).T.astype('float32')
+
+    def interpolate(self,xy,value,kernel='thin_plate_spline'):
+        # Interpolates value from grid (xy) to desired points (coords) using a Radial Bias Function
+        # Default behavior is to use a thin plate spline function r**2 * log(r)
+
+        return(
+            RBFInterpolator(xy, value, kernel=kernel,neighbors=self.neighbors)(self.target).astype('float32')
+            )
 
 @dataclass(kw_only=True)
 class getNARR:
     variableNames: list
     dates: list
     level: str
-    baseURL: str = 'https://downloads.psl.noaa.gov/Datasets/NARR'
-    downloadPath: str = os.path.abspath(os.path.join(os.path.split(__file__)[0],'..','ncFiles'))
 
-    samplePoints: dict = field(default_factory=lambda:{
-        'name':[],'lat':[],'lon':[]
-    })
-    grid_pad: int = 2
-    searchDistance: float = 5e4
-    extrapolate: bool = False
+    # samplePoints: dict = field(default_factory=lambda:{
+    #     'siteID':[],'lat':[],'lon':[]
+    # })
+    neighbors: int = 20
     metadata: dict = field(init=False,default_factory=dict)
-    timeSeries: dict = field(init=False,default_factory=dict)
+    # timeSeries: dict = field(init=False,default_factory=dict)
 
     def __post_init__(self):
         self.setTarget()
@@ -46,10 +216,7 @@ class getNARR:
         NARR_LCC = '+proj=lcc +lat_1=50 +lat_0=50 +lon_0=-107 +k_0=1 +x_0=5632642.22547 +y_0=4612545.65137 +a=6371200 +b=6371200 +units=m +no_defs'
         self.samplePoints = self.samplePoints.to_crs(NARR_LCC)
         
-        # bbox = self.samplePoints.total_bounds
-        self.target = np.array([self.samplePoints.geometry.x,self.samplePoints.geometry.y]).T
-        # searchBuffer = self.samplePoints.buffer(self.searchDistance).geometry
-
+        self.target = np.array([self.samplePoints.geometry.x,self.samplePoints.geometry.y]).T.astype('float32')
 
     def getData(self):
         if not isinstance(self.dates,list):
@@ -80,7 +247,6 @@ class getNARR:
                 self.timeSeries[year][vn] = self.readData(year,vn,fp)
             self.timeSeries[year] = pd.concat([self.timeSeries[year][vn] for vn in vars.keys()],axis=1)
         self.timeSeries = pd.concat([self.timeSeries[year] for year in self.timeSeries.keys()],axis=0)
-        breakpoint()
         self.timeSeries.to_csv(os.path.join(self.downloadPath,'interpolatedTimeSeries.csv'))
 
 
@@ -101,7 +267,7 @@ class getNARR:
         self.x = np.ma.getdata(dataset.variables['x'][:])
         self.y = np.ma.getdata(dataset.variables['y'][:])
 
-        self.metadata[vn] = dataset.variables[vn.split('.')[0]]
+        self.metadata[vn] = dataset.variables[vn.split('.')[0]].__dict__
         data = np.ma.getdata(dataset.variables[vn.split('.')[0]][:])
 
         x,y = np.meshgrid(self.x,self.y)
@@ -110,25 +276,25 @@ class getNARR:
 
         print(f'Interpolating {vn}-{year}: ')
         T1 = time.time()
+        interpolatedValues = np.array(
+                    [self.interpolate(data[i,:,:].flatten()) for i in range(index.shape[0])]
+                )
+        print('runtime = ',round(time.time()-T1,2))
+        interpolatedValues[np.where(interpolatedValues<self.metadata[vn]['actual_range'].min())]=self.metadata[vn]['actual_range'].min()
+        interpolatedValues[np.where(interpolatedValues>self.metadata[vn]['actual_range'].max())]=self.metadata[vn]['actual_range'].max()
         interpolatedValues = pd.DataFrame(
             index = index,
-            columns=[f"{vn}_{n}" for n in self.samplePoints['name']],
-            data = np.array(
-                    [self.interpolate(data[i,:,:].flatten()) for i in range(index.shape[0])]
-                ))
-        print('runtime = ',round(time.time()-T1,2))
+            columns=[f"{vn}_{n}" for n in self.samplePoints['siteID']],
+            data = interpolatedValues)
         return(interpolatedValues)
 
-    def interpolate(self,value,kernel='thin_plate_spline',neighbors=20):
+    def interpolate(self,value,kernel='thin_plate_spline'):
         # Interpolates value from grid (xy) to desired points (coords) using a Radial Bias Function
         # Default behavior is to use a thin plate spline function r**2 * log(r)
 
-        vx = RBFInterpolator(self.xy, value, kernel=kernel,neighbors=neighbors)(self.target)
-        if not self.extrapolate:
-            breakpoint()
-            vx[vx<value.min()]=value.min()
-            vx[vx>value.max()]=value.max()
-        return(vx)
+        return(
+            RBFInterpolator(self.xy, value, kernel=kernel,neighbors=self.neighbors)(self.target).astype('float32')
+            )
 
 @dataclass(kw_only=True)
 class downloadNARR:
@@ -211,7 +377,7 @@ class readNARR(downloadNARR):
                     self.coordinates[vn]['lat'] = np.ma.getdata(dataset.variables['lat'][:])
                     self.coordinates[vn]['x'] = np.ma.getdata(dataset.variables['x'][:])
                     self.coordinates[vn]['y'] = np.ma.getdata(dataset.variables['y'][:])
-                    self.metadata[vn] = dataset.variables[vn.split('.')[0]]
+                    self.metadata[vn] = dataset.variables[vn.split('.')[0]].__dict__
                     self.data[vn] = []
                     self.data[vn] = np.ma.getdata(dataset.variables[vn.split('.')[0]][:])
                 else:
@@ -223,7 +389,7 @@ class readNARR(downloadNARR):
 @dataclass(kw_only=True)
 class interpolateNARR(readNARR):
     samplePoints: dict = field(default_factory=lambda:{
-        'name':[],'lat':[],'lon':[]
+        'siteID':[],'lat':[],'lon':[]
     })
     grid_pad: int = 2
     searchDistance: float = 5e4
@@ -249,13 +415,11 @@ class interpolateNARR(readNARR):
         x,y = np.meshgrid(self.x,self.y)
         x,y = x.flatten(),y.flatten()
 
-        # breakpoint()
         gridPoints = gpd.GeoDataFrame(index = np.arange(0,self.lon.shape[0]*self.lon.shape[1]),geometry=gpd.points_from_xy(x,y))
         gridIndex = gridPoints.index.values.reshape(self.lat.shape)
         selection = gridPoints[gridPoints.within(searchBuffer)]
         key = np.where(np.isin(gridIndex,selection.index.values))
 
-        # breakpoint()
         # xi,yi = np.meshgrid(selection.geometry.x.values,selection.geometry.y.values)
         # xi,yi = xi.flatten(),yi.flatten()
         self.xy = np.array([selection.geometry.x.values,selection.geometry.y.values]).T
@@ -265,14 +429,13 @@ class interpolateNARR(readNARR):
         self.timeSeries = pd.concat(
             [pd.DataFrame(
                 index=self.index,
-                columns=[f"{vn}_{n}" for n in self.samplePoints['name']],
+                columns=[f"{vn}_{n}" for n in self.samplePoints['siteID']],
                 data = np.array(
                     [self.interpolate(self.data[vn][i,key[0],key[1]]) for i in range(self.index.shape[0])]
                 )
             )
             for vn in self.variableNames],axis=1
         )
-        breakpoint()
 
         # Make plot of grid cells
         # lon_box = self.lon[key[0],key[1]]
@@ -281,17 +444,15 @@ class interpolateNARR(readNARR):
         # m = folium.Map(location=[self.samplePoints.lat[0],self.samplePoints.lon[0]])   
         # for at,on in zip (lat_box.flatten(),lon_box.flatten()):
         #     folium.Marker([at, on]).add_to(m)
-        # folium.CircleMarker([self.samplePoints.lat[0],self.samplePoints.lon[0]],popup=self.samplePoints.name[0]).add_to(m)
-        # m.save(os.path.join(self.downloadPath,f'{self.samplePoints.name[0]}_{self.variableNames}_grid_pts.html'))
-
-        # breakpoint()
+        # folium.CircleMarker([self.samplePoints.lat[0],self.samplePoints.lon[0]],popup=self.samplePoints.siteID[0]).add_to(m)
+        # m.save(os.path.join(self.downloadPath,f'{self.samplePoints.siteID[0]}_{self.variableNames}_grid_pts.html'))
 
     def interpolate(self,value,kernel='linear'):
         # Interpolates value from grid (xy) to desired points (coords) using a Radial Bias Function
         # Default behavior is to use a thin plate spline function r**2 * log(r)
 
         vx = RBFInterpolator(self.xy, value, kernel=kernel)(self.target)
-        if not self.extrapolate:
-            vx[vx<value.min()]=value.min()
-            vx[vx>value.max()]=value.max()
+        # if not self.extrapolate:
+        #     vx[vx<value.min()]=value.min()
+        #     vx[vx>value.max()]=value.max()
         return(vx)
