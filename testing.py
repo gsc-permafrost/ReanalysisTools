@@ -22,5 +22,5 @@ if not os.path.isdir(downloadPath):
 px = NARR.pointEstimates(
     downloadPath=downloadPath,
     years=[i for i in range(2024,2027)],
-    variableNames=['dswrf','air.2m','dlwrf','uswrf','ulwrf','air.2m','apcp','pres','snod ','rhum','pblh','uwnd','vwnd'],
+    variableNames=['dswrf','dlwrf'],#,'uswrf','ulwrf','air.2m','apcp','pres','snod ','rhum','pblh','uwnd','vwnd'],
     samplePoints='siteID.yml')
