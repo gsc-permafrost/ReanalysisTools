@@ -25,14 +25,13 @@ class narrData:
     metadata: dict = field(init=False,default_factory=dict)
 
     def __post_init__(self):
-        # self.getFileList()
         self.findFiles()
 
     def findFiles(self):
         
         if not isinstance(self.variableNames,list):
             self.variableNames = [self.variableNames]
-        self.fileIndex = {yr:{vn:self.getFile(yr,vn) for vn in self.variableNames} for yr in self.years}
+        self.fileIndex = {vn:{yr:self.getFile(yr,vn) for yr in self.years} for vn in self.variableNames}
     
     def getFile(self,year,variableName,subFolder='fullYear'):
         filePath,exists = self.formatFilePath(f"{variableName}.{year}.nc",subFolder)
@@ -41,6 +40,7 @@ class narrData:
                 filePath = self.getFile(year,variableName,subFolder='partialYear')
             else: 
                 self.download(f"{variableName}.{year}.nc",filePath)
+                filePath,flag=self.timeCheck(filePath)
         elif exists and subFolder == 'partialYear':
             filePath,flag=self.timeCheck(filePath)
             if flag:
@@ -52,6 +52,8 @@ class narrData:
             tx = self.getTime(dataset)
         if tx.month.max()==12 and 'partialYear' in filePath:
             fp = filePath.replace('partialYear','fullYear')
+            if not os.path.isdir(os.path.split(fp)[0]):
+                os.makedirs(os.path.split(fp)[0])
             shutil.move(filePath,fp)
             filePath = fp
             flag = False
@@ -79,8 +81,9 @@ class narrData:
     def download(self,fileName,filePath):
         url = self.urlPath(fileName)
         print(f'downloading: {url}')
-        if not os.path.isdir(self.downloadPath):
-            os.makedirs(self.downloadPath)
+        if not os.path.isdir(os.path.split(filePath)[0]):
+            os.makedirs(os.path.split(filePath)[0])
+        
         urllib.request.urlretrieve(url,filePath)
         print(f'saved: {filePath}')
     
@@ -112,60 +115,59 @@ class pointEstimates(narrData):
     def __post_init__(self):
         self.getSamplePoints()
         self.getTimeSeries()
-        super().__post_init__()
-# (Pdb) c1.flatten()
-# array(['dswrf', 'air.2m', 'dswrf', 'air.2m', 'dswrf', 'air.2m', 'dswrf',
-#        'air.2m'], dtype='<U6')
-# (Pdb) c2.flatten()
-# array(['SCL', 'SCL', 'BSP', 'BSP', 'FIL', 'FIL', 'ILL', 'ILL'],
-    #   dtype=object)
-        for year,vars in self.fileIndex.items():
-            for variableName,filePath in vars.items():
-                index,xy,data = self.read(variableName,filePath)
-                sites = self.samplePoints.siteID.values
-                siteVars = [f"{variableName}_{ID}" for ID in sites]
-                # siteVarsIn = [sv for sv in siteVars if sv in self.timeSeries.columns]
-                # if len(siteVarsIn) < siteVars:
+        super().__post_init__()        
+        for variableName,vars in self.fileIndex.items():
+            for year,filePath in vars.items():
+                self.interpolateValues(year,variableName,filePath)
+        self.timeSeries.to_csv(self.timeSeriesFname)
+        mdF = os.path.join(self.downloadPath,'metadata.yml')
+        if os.path.isfile(mdF):
+            with open(mdF) as f:
+                mdIn = yaml.safe_load(f)
+        else:
+            mdIn = {}
+        cleanMD = {key:{k:v.item() if isinstance(v,np.generic) else v if not isinstance(v,np.ndarray) else v.tolist() for k,v in value.items()} for key,value in self.metadata.items()}
+        mdOut = mdIn | cleanMD
+        with open(mdF,'w+') as f:
+            yaml.safe_dump(mdOut,f)
+        
 
-                print(f'Interpolating {variableName}-{year}: ')
-                T1 = time.time()
-                interpolatedValues = np.array(
-                            [self.interpolate(xy,data[i,:,:].flatten()) for i in range(index.shape[0])]
-                        )
-                print('runtime = ',round(time.time()-T1,2))
-                interpolatedValues[np.where(interpolatedValues<self.metadata[variableName]['actual_range'].min())]=self.metadata[variableName]['actual_range'].min()
-                interpolatedValues[np.where(interpolatedValues>self.metadata[variableName]['actual_range'].max())]=self.metadata[variableName]['actual_range'].max()
-                interpolatedValues = pd.DataFrame(
-                    index = index,
-                    columns=siteVars,
-                    data = interpolatedValues)
-                breakpoint()
-        # sites = self.samplePoints.siteID.values
-        # site_vars = [f"{v}_{ID}" for v in self.variableNames for ID in sites]
-        # need_all =  [v for v in site_vars if v not in self.timeSeries.columns]
-        # need_some = [v for v in site_vars if v in self.timeSeries.columns]
+    def interpolateValues(self,year,variableName,filePath,kernel = 'thin_plate_spline'):
 
-        # print([v in site_vars for v in self.timeSeries.columns])
-
-
+        index,xy,data = self.read(variableName,filePath)
+        summary = self.timeSeries.loc[self.timeSeries.index.year==year,variableName].count()
+        sites = summary.index[summary<index.shape]
+        sites = [v for v in sites[sites.isin(self.samplePoints.siteID)]]
+        g = self.samplePoints.loc[sites].geometry
+        targetPoints = np.array([g.x,g.y]).T.astype('float32')       
+        if len(sites):
+            print(f'Interpolating {variableName}-{year} for: {sites}')
+            
+            interpolatedValues = pd.DataFrame(
+                index=index,
+                columns=pd.MultiIndex.from_arrays([[variableName for s in sites],sites]),
+                data = [
+                    RBFInterpolator(xy, data[i,:,:].flatten(), kernel=kernel,neighbors=self.neighbors)(targetPoints).astype('float32')
+                    for i in range(index.shape[0])
+                ])
+            self.timeSeries.loc[interpolatedValues.index,interpolatedValues.columns] = interpolatedValues.copy()
+    
     def getTimeSeries(self):
         index = pd.date_range(start=f'{min(self.years)}-01-01',end=f'{max(self.years)+1}-01-01',freq='3h',inclusive='left').tz_localize('UTC')
         self.timeSeriesFname = os.path.join(self.downloadPath,self.timeSeriesFname)
         c1,c2=np.meshgrid(self.samplePoints.siteID.values,self.variableNames)
         c1,c2=c1.flatten(),c2.flatten()
-        temp = pd.DataFrame(index=index,columns=pd.MultiIndex.from_arrays([c2,c1]))
+        self.timeSeries = pd.DataFrame(index=index,columns=pd.MultiIndex.from_arrays([c2,c1]))
         if os.path.isfile(self.timeSeriesFname):
-            breakpoint()
-            self.timeSeries = pd.read_csv(self.timeSeriesFname,index_col=0,parse_dates=[0],header=[0,1])
-            self.timeSeries = pd.concat(
-                [temp,self.timeSeries],axis=1
-            )
-        else:
-            self.timeSeries = temp
-            
-        print([s for s in self.samplePoints.siteID.values if s in self.timeSeries['dswrf'].columns])
-        breakpoint()
-        
+            tx = pd.read_csv(self.timeSeriesFname,index_col=0,parse_dates=[0],header=[0,1])
+            ix = tx.index.isin(self.timeSeries.index)
+            cx = tx.columns.isin(self.timeSeries.columns)
+            # Add the exiting row/column pairs within the current query
+            self.timeSeries.loc[tx[ix].index,tx.columns[cx]] = tx.loc[tx[ix].index,tx.columns[cx]]
+            # Add the missing columns within the query time-frame
+            self.timeSeries[tx.columns[~cx]]=tx.loc[tx[ix].index,tx.columns[~cx]]
+            # add the missing timeframe
+            self.timeSeries = pd.concat([self.timeSeries,tx.loc[tx[~ix].index]]).sort_index()
 
     def getSamplePoints(self):
         if isinstance(self.samplePoints,str):
@@ -178,15 +180,6 @@ class pointEstimates(narrData):
         # WKT description of the NARR LCC projection, source: https://spatialreference.org/ref/sr-org/8214/
         NARR_LCC = '+proj=lcc +lat_1=50 +lat_0=50 +lon_0=-107 +k_0=1 +x_0=5632642.22547 +y_0=4612545.65137 +a=6371200 +b=6371200 +units=m +no_defs'
         self.samplePoints = self.samplePoints.to_crs(NARR_LCC)
-        self.target = np.array([self.samplePoints.geometry.x,self.samplePoints.geometry.y]).T.astype('float32')
-
-    def interpolate(self,xy,value,kernel='thin_plate_spline'):
-        # Interpolates value from grid (xy) to desired points (coords) using a Radial Bias Function
-        # Default behavior is to use a thin plate spline function r**2 * log(r)
-
-        return(
-            RBFInterpolator(xy, value, kernel=kernel,neighbors=self.neighbors)(self.target).astype('float32')
-            )
 
 @dataclass(kw_only=True)
 class getNARR:
