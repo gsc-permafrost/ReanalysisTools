@@ -18,9 +18,11 @@ if not os.path.isdir(downloadPath):
 #         'name':['SCL','BSP'],
 #         'lat':[69.229178,69.319431,],
 #         'lon':[-135.257278,-135.478286]})
-# breakpoint()
+
 px = NARR.pointEstimates(
     downloadPath=downloadPath,
-    years=[i for i in range(2024,2027)],
+    years=[i for i in range(2024,2025)],
     variableNames=['dswrf','dlwrf'],#,'uswrf','ulwrf','air.2m','apcp','pres','snod ','rhum','pblh','uwnd','vwnd'],
     samplePoints='siteID.yml')
+
+breakpoint()
