@@ -23,6 +23,8 @@ class narrData:
     baseURL: str = 'https://downloads.psl.noaa.gov/Datasets/NARR'
     downloadPath: str = os.path.abspath(os.path.join(os.path.split(__file__)[0],'..','ncFiles'))
     metadata: dict = field(init=False,default_factory=dict)
+    # WKT description of the NARR LCC projection, source: https://spatialreference.org/ref/sr-org/8214/
+    NARR_LCC = '+proj=lcc +lat_1=50 +lat_0=50 +lon_0=-107 +k_0=1 +x_0=5632642.22547 +y_0=4612545.65137 +a=6371200 +b=6371200 +units=m +no_defs'
 
     def __post_init__(self):
         mdF = os.path.join(self.downloadPath,'metadata.yml')
@@ -50,16 +52,20 @@ class narrData:
                 filePath = self.getFile(year,variableName,subFolder='partialYear')
             else: 
                 self.download(f"{variableName}.{year}.nc",filePath)
-                filePath,flag=self.timeCheck(filePath)
+                filePath,flag=self.timeCheck(variableName,filePath)
         elif exists and subFolder == 'partialYear':
-            filePath,flag=self.timeCheck(filePath)
+            filePath,flag=self.timeCheck(variableName,filePath)
             if flag:
                 filePath = self.getFile(year,variableName,subFolder='partialYear')
+        if variableName not in self.metadata:
+            _,md=self.read(variableName,filePath,mode='partial')
+            self.metadata[variableName] = md
         return filePath
     
-    def timeCheck(self,filePath):
-        with netCDF4.Dataset(filePath) as dataset:
-            tx = self.getTime(dataset)
+    def timeCheck(self,variableName,filePath):
+        tx,md=self.read(variableName,filePath,mode='partial')
+        if variableName not in self.metadata:
+            self.metadata[variableName] = md
         if tx.month.max()==12 and 'partialYear' in filePath:
             fp = filePath.replace('partialYear','fullYear')
             if not os.path.isdir(os.path.split(fp)[0]):
@@ -68,7 +74,8 @@ class narrData:
             filePath = fp
             flag = False
         else:
-            if tx.month.max() != datetime.datetime.now().month-1 and (time.time()-os.path.getctime(filePath))/(3660*24) >1:
+            # redownload partials over one month old if hasn't been redownloaded in last 24hr to check for updates
+            if tx.month.max() != datetime.datetime.now().month-1 and (time.time()-os.path.getctime(filePath))/(3600*24) >1:
                 os.remove(filePath)
                 print(f"removing and re-downloading: {filePath}")
                 flag = True
@@ -98,14 +105,17 @@ class narrData:
         print(f'saved: {filePath}')
     
     def read(self,variableName,filePath,mode='full'):
+        if mode != 'full':
+            with netCDF4.Dataset(filePath) as dataset:
+                tx = self.getTime(dataset)
+                md = dataset.variables[variableName.split('.')[0]].__dict__
+                return (tx,md)
         with netCDF4.Dataset(filePath) as dataset:
             tx = self.getTime(dataset)
             lon = np.ma.getdata(dataset.variables['lon'][:])
             lat = np.ma.getdata(dataset.variables['lat'][:])
             x = np.ma.getdata(dataset.variables['x'][:])
             y = np.ma.getdata(dataset.variables['y'][:])
-            if 'variableName' not in self.metadata:
-                self.metadata[variableName] = dataset.variables[variableName.split('.')[0]].__dict__
             data = np.ma.getdata(dataset.variables[variableName.split('.')[0]][:])
             
             x,y = np.meshgrid(x,y)
@@ -117,7 +127,7 @@ class narrData:
 @dataclass(kw_only=True)
 class pointEstimates(narrData):
     samplePoints: gpd.GeoDataFrame = field(default_factory=dict)
-    samplePointsFname: str = 'samplePoints.json'
+    # samplePointsFname: str = 'samplePoints.json'
     timeSeries: pd.DataFrame = field(default_factory=pd.DataFrame)
     timeSeriesFname: str = 'interpolatedTimeSeries.csv'
     neighbors: int = 20
@@ -181,7 +191,14 @@ class pointEstimates(narrData):
         self.samplePoints = gpd.GeoDataFrame(
             data=self.samplePoints, geometry=gpd.points_from_xy(self.samplePoints['longitude'], self.samplePoints['latitude']), crs="EPSG:4326"
         )
-        # WKT description of the NARR LCC projection, source: https://spatialreference.org/ref/sr-org/8214/
-        NARR_LCC = '+proj=lcc +lat_1=50 +lat_0=50 +lon_0=-107 +k_0=1 +x_0=5632642.22547 +y_0=4612545.65137 +a=6371200 +b=6371200 +units=m +no_defs'
-        self.samplePoints = self.samplePoints.to_crs(NARR_LCC)
+        self.samplePoints = self.samplePoints.to_crs(self.NARR_LCC)
 
+@dataclass(kw_only=True)
+class zonalStats(narrData):
+    samplePolygons: gpd.GeoDataFrame = field(default_factory=gpd.GeoDataFrame)
+
+    def __post_init__(self):
+        super().__post_init__()
+        if isinstance(self.samplePolygons,str):
+            self.samplePolygons = gpd.read_file(self.samplePolygons)
+        self.samplePolygons = self.samplePolygons.to_crs(self.NARR_LCC)
