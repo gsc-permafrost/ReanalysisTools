@@ -14,10 +14,12 @@ import folium
 from scipy.interpolate import RBFInterpolator
 import datetime
 import time
+from submodules.helperFunctions.baseClass import baseDataClass
+from submodules.helperFunctions.cmdParse import cmdParse
 
 @dataclass(kw_only=True)
-class narrData:
-    years: list
+class narrData(baseDataClass):
+    dates: list
     variableNames: list
     level: str = 'monolevel'
     baseURL: str = 'https://downloads.psl.noaa.gov/Datasets/NARR'
@@ -27,6 +29,11 @@ class narrData:
     NARR_LCC = '+proj=lcc +lat_1=50 +lat_0=50 +lon_0=-107 +k_0=1 +x_0=5632642.22547 +y_0=4612545.65137 +a=6371200 +b=6371200 +units=m +no_defs'
 
     def __post_init__(self):
+        if isinstance(self.dates,dict) and 'start' in self.dates:
+            if 'stop' in self.dates:
+                self.dates = [y for y in range(int(self.dates['start']),int(self.dates['stop'])+1)]
+            else:
+                self.dates = [int(self.dates['start'])]
         mdF = os.path.join(self.downloadPath,'metadata.yml')
         if os.path.isfile(mdF):
             with open(mdF) as f:
@@ -43,7 +50,7 @@ class narrData:
         
         if not isinstance(self.variableNames,list):
             self.variableNames = [self.variableNames]
-        self.fileIndex = {vn:{yr:self.getFile(yr,vn) for yr in self.years} for vn in self.variableNames}
+        self.fileIndex = {vn:{yr:self.getFile(yr,vn) for yr in self.dates} for vn in self.variableNames}
     
     def getFile(self,year,variableName,subFolder='fullYear'):
         filePath,exists = self.formatFilePath(f"{variableName}.{year}.nc",subFolder)
@@ -166,7 +173,7 @@ class pointEstimates(narrData):
             self.timeSeries.loc[interpolatedValues.index,interpolatedValues.columns] = interpolatedValues.copy()
     
     def getTimeSeries(self):
-        index = pd.date_range(start=f'{min(self.years)}-01-01',end=f'{max(self.years)+1}-01-01',freq='3h',inclusive='left').tz_localize('UTC')
+        index = pd.date_range(start=f'{min(self.dates)}-01-01',end=f'{max(self.dates)+1}-01-01',freq='3h',inclusive='left').tz_localize('UTC')
         self.timeSeriesFname = os.path.join(self.downloadPath,self.timeSeriesFname)
         c1,c2=np.meshgrid(self.samplePoints.siteID.values,self.variableNames)
         c1,c2=c1.flatten(),c2.flatten()
@@ -187,7 +194,7 @@ class pointEstimates(narrData):
         if isinstance(self.samplePoints,str):
             with open(self.samplePoints) as f:
                 self.samplePoints = yaml.safe_load(f)
-            self.samplePoints = pd.DataFrame.from_dict(self.samplePoints,orient='index')
+        self.samplePoints = pd.DataFrame.from_dict(self.samplePoints,orient='index')
         self.samplePoints = gpd.GeoDataFrame(
             data=self.samplePoints, geometry=gpd.points_from_xy(self.samplePoints['longitude'], self.samplePoints['latitude']), crs="EPSG:4326"
         )
@@ -202,3 +209,19 @@ class zonalStats(narrData):
         if isinstance(self.samplePolygons,str):
             self.samplePolygons = gpd.read_file(self.samplePolygons)
         self.samplePolygons = self.samplePolygons.to_crs(self.NARR_LCC)
+
+@dataclass(kw_only=True)
+class dispatch(baseDataClass):
+    mode: str
+
+if __name__ == '__main__':
+    # dispatch.from_cmd()
+    kwargs,auxargs = cmdParse(defaultArgs=dispatch.defaults(),safeMode=False)
+    mode = kwargs.pop('mode')
+    configFile = kwargs.pop('configFile')
+    method = eval(mode)
+    if configFile is not None:
+        method.from_yaml(configFile,kwargs,kwargOverwrite=True)
+    else:
+        method.from_dict(kwargs)
+    

@@ -4,3 +4,6 @@ scipy
 matplotlib
 folium
 pyyaml
+utm
+ruamel.yaml
+dateparser

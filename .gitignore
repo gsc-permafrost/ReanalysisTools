@@ -1,5 +1,5 @@
 .venv
 .vscode
-requirements.txt
 *ncFiles
+*.nc
 *__pycache__

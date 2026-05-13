@@ -1,0 +1,28 @@
+# downloadPath - where raw .nc files (~250-350mb each for 3-hrly, less for daily/monthly) and
+# processed data (timeSeries & metadata) data w
+downloadPath: C:/some/path/where/data/will/go
+# currently only supports monolevel, pressure levels will come later
+level: monolevel
+# will download all years in [start:stop] (or just start if only one needed)
+# will do full year by default
+dates:
+  start: 2024
+  stop: 2026
+# variable names, for full list of options see: https://psl.noaa.gov/data/gridded/data.narr.html
+variableNames:
+  - dswrf
+  - dlwrf
+  - uswrf.sfc
+  - ulwrf.sfc
+  - air.2m
+  - apcp
+# Coordinates and ID for all sites desired
+samplePoints:
+  SCL:
+    siteID: SCL
+    latitude: 69.229178
+    longitude: -135.257278
+  BSP:
+    siteID: BSP
+    latitude: 69.319431
+    longitude: -135.478286
