@@ -14,8 +14,8 @@ import folium
 from scipy.interpolate import RBFInterpolator
 import datetime
 import time
-from submodules.helperFunctions.baseClass import baseDataClass
-from submodules.helperFunctions.cmdParse import cmdParse
+from scripts.submodules.helperFunctions.baseClass import baseDataClass
+from scripts.submodules.helperFunctions.cmdParse import cmdParse
 
 @dataclass(kw_only=True)
 class narrData(baseDataClass):
@@ -221,6 +221,8 @@ if __name__ == '__main__':
     configFile = kwargs.pop('configFile')
     method = eval(mode)
     if configFile is not None:
+        kwargs['timeSeriesFname'] = os.path.split(configFile)[-1].replace('.yml','.csv')
+        print(kwargs['timeSeriesFname'])
         method.from_yaml(configFile,kwargs,kwargOverwrite=True)
     else:
         method.from_dict(kwargs)
